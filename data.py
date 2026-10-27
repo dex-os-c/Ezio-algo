@@ -91,7 +91,13 @@ def load_history(cfg, log=print):
         old = pd.read_csv(path, index_col=0, parse_dates=True) if os.path.exists(path) else None
         start = int(old.index[-1].timestamp() * 1000) + ms if old is not None else int(time.time() * 1000 - cfg.years * 365 * 86400_000)
         log(f"loading {cfg.symbol} {cfg.timeframe} from {cfg.exchange}" + (" (cache + new candles)" if old is not None else f" ({cfg.years:g} years)"))
-        new = fetch_ccxt(cfg, start, log)
+        try:
+            new = fetch_ccxt(cfg, start, log)
+        except Exception as e:
+            if old is None:
+                raise
+            log(f"  could not fetch new candles ({type(e).__name__}); using the cached file")
+            new = old.iloc[:0]
         df = pd.concat([old, new]) if old is not None else new
         df = df[~df.index.duplicated()].sort_index()
         if len(df) < 500:
