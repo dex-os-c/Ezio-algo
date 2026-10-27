@@ -60,7 +60,10 @@ def build_features(df, cfg, overlays=False):
     return (F, ov) if overlays else F
 
 
-def make_labels(df, horizon):
+def make_labels(df, horizon, cfg=None):
+    if cfg is not None and getattr(cfg, "label", "tb") == "tb":
+        from labels import triple_barrier
+        return triple_barrier(df, horizon, getattr(cfg, "tb_mult", 1.0))
     fwd = df.close.shift(-horizon) / df.close - 1
     y = (fwd > 0).astype(float)
     y[fwd.isna()] = np.nan
@@ -77,7 +80,7 @@ def clean(F):
 def dataset(df, cfg):
     """features + labels aligned; head (warm-up) and tail (future unknown) removed"""
     F = clean(build_features(df, cfg))
-    y, _ = make_labels(df, cfg.horizon)
+    y, _ = make_labels(df, cfg.horizon, cfg)
     y = y.reindex(F.index)
     keep = y.notna().values
     last = len(keep) - keep[::-1].argmax() if keep.any() else 0

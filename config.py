@@ -15,6 +15,8 @@ class Cfg:
     features: str = "base,smc,amt"   # which feature sets (see features.py)
     # ---- target / model ----
     horizon: int = 8                 # predict direction of the next N bars
+    label: str = "tb"                # tb = triple-barrier (ATR stop/target, next-open entry) | close = sign of return at horizon
+    tb_mult: float = 1.0             # barrier distance in ATRs (symmetric, so p>0.5 still means long)
     seq_len: int = 48
     hidden: int = 64
     epochs: int = 12

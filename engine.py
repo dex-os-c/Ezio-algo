@@ -251,7 +251,7 @@ class Session:
         S, H = c.seq_len, c.horizon
         d = rd.df.iloc[max(0, i + 1 - (c.ft_window + 600)):i + 1]
         F = clean(build_features(d, c))
-        y, _ = make_labels(d, H)
+        y, _ = make_labels(d, H, c)
         y = y.reindex(F.index)
         ok = y.notna().values
         F, y = F[ok], y[ok].values
