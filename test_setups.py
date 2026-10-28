@@ -29,13 +29,15 @@ def main():
     df = synthetic(30000, 11, "1h")
     ev = find_setups(df)
     assert len(ev) > 50, len(ev)
+    assert ev.s_mode.nunique() >= 2, 'expected several entry modes'
+    assert set(ev.s_mode) <= {0, 1, 2}
     check(df, ev, 2.0, 48)
     print(f"geometry + independent re-simulation ok ({len(ev)} setups)")
 
     cut = 20000                                       # no lookahead: truncating the future must not change closed trades
     part = find_setups(df.iloc[:cut])
     full = ev[ev.exit < cut].reset_index(drop=True)
-    cols = ["sig", "dir", "entry", "stop", "tp", "fill", "exit", "outcome", "R", "s_sweep_depth", "s_fvg_atr", "s_tgt_R"]
+    cols = ["sig", "dir", "entry", "stop", "tp", "fill", "exit", "outcome", "R", "s_sweep_depth", "s_zone_atr", "s_mode", "s_tgt_R"]
     a, b = part[cols].reset_index(drop=True), full[cols]
     assert len(a) == len(b), (len(a), len(b))
     pd.testing.assert_frame_equal(a, b)

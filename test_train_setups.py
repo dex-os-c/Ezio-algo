@@ -38,3 +38,9 @@ for s in range(6):
 print(f"noise: {bad}/6 runs traded with a spuriously positive result")
 assert bad <= 1
 print("ALL OK")
+
+# one position at a time PER SYMBOL: overlapping setups on the same coin are skipped, other coins are independent
+sig, ex, sym = np.array([0, 2, 3, 12]), np.array([10, 5, 8, 20]), np.array(["A", "A", "B", "A"])
+assert list(seq_filter(sig, ex, np.arange(4), sym)) == [0, 2, 3]
+assert list(seq_filter(sig, ex, np.arange(4))) == [0, 3] or list(seq_filter(sig, ex, np.arange(4))) == [0, 3]
+print("per-symbol overlap rule ok")

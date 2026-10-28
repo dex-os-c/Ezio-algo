@@ -1,7 +1,11 @@
 """Meta-labeling on ICT setups: the rules propose a trade (sweep -> MSS -> FVG retest), LightGBM only decides take / skip.
 
+  python train_setups.py --symbols BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT --timeframe 1h --years 20 --out runs/pool_1h
   python train_setups.py --symbol BTC/USDT --timeframe 1h --years 20 --out runs/btc_setups
   python train_setups.py --source synthetic --bars 30000 --out runs/syn_setups          # plumbing test
+
+Several symbols are POOLED into one model (all features are in ATR units, so markets are comparable); walk-forward folds and the
+holdout are split by TIME across all symbols, and the one-trade-at-a-time rule is applied per symbol.
 
 Honesty rules built in:
   * purged walk-forward (train events must have closed before the test block starts) + one untouched holdout
@@ -9,7 +13,7 @@ Honesty rules built in:
   * results are in R (risk units, costs included) and are compared with the unfiltered setups and a random-selection test
   * a trial counter (runs/trials.json) deflates the p-value for how many times you have already tried this market
 """
-import json, os
+import copy, json, os
 import numpy as np, pandas as pd
 from config import parse
 from data import load_history
@@ -21,7 +25,11 @@ try:
 except Exception:                                     # pragma: no cover
     lgb = None
 
-EXTRA = [(["--rr"], dict(type=float, default=DEFAULT["rr"], help="target in R (take-profit = rr x risk)")),
+EXTRA = [(["--symbols"], dict(type=str, default="", help="comma list to pool, e.g. BTC/USDT,ETH/USDT,SOL/USDT (default: --symbol)")),
+         (["--entry_mode"], dict(type=str, default=DEFAULT["entry_mode"], help="any | fvg | ob | ote")),
+         (["--maker_bps"], dict(type=float, default=DEFAULT["maker_bps"], help="fee on limit entries / limit targets (bps)")),
+         (["--max_risk"], dict(type=float, default=DEFAULT["max_risk"], help="widest allowed stop, in ATRs")),
+         (["--rr"], dict(type=float, default=DEFAULT["rr"], help="target in R (take-profit = rr x risk)")),
          (["--win"], dict(type=int, default=DEFAULT["win"], help="bars allowed between sweep and structure shift")),
          (["--fill_win"], dict(type=int, default=DEFAULT["fill_win"], help="bars the limit order stays alive")),
          (["--max_hold"], dict(type=int, default=DEFAULT["max_hold"], help="max bars in a trade")),
@@ -30,13 +38,14 @@ EXTRA = [(["--rr"], dict(type=float, default=DEFAULT["rr"], help="target in R (t
          (["--perm"], dict(type=int, default=2000, help="random-selection permutations for the p-value"))]
 
 
-def seq_filter(sig, ex, idx):
-    """one position at a time: skip any setup signalled while the previous accepted trade is still open"""
-    keep, last = [], -1
+def seq_filter(sig, ex, idx, sym=None):
+    """one position at a time PER SYMBOL: skip any setup signalled while that symbol's previous accepted trade is still open"""
+    keep, last = [], {}
     for k in idx:
-        if sig[k] > last:
+        g = sym[k] if sym is not None else 0
+        if sig[k] > last.get(g, -1):
             keep.append(k)
-            last = ex[k]
+            last[g] = ex[k]
     return np.array(keep, int)
 
 
@@ -109,31 +118,71 @@ def train_block(X, R, y, sig, ex, tr_end, min_n, seed):
     return m, pick_threshold(pv, R[va], min_n)
 
 
+def load_events(cfg, sp, log):
+    """setups + context features for every symbol, pooled and sorted by signal TIME"""
+    syms = [x.strip() for x in cfg.args.symbols.split(",") if x.strip()] or [cfg.symbol]
+    evs, Xs, funnel = [], [], dict(sweep=0, mss=0, zone=0, trade=0)
+    for i, sym in enumerate(syms):
+        c = copy.copy(cfg)
+        c.symbol = sym
+        c.seed = cfg.seed + i                         # synthetic only: a different fake market per symbol
+        try:
+            df = load_history(c, log)
+        except Exception as e:                        # one missing coin must not kill a pooled run
+            log(f"  {sym}: skipped ({type(e).__name__}: {str(e)[:80]})")
+            continue
+        F = clean(build_features(df, c))
+        fn = {}
+        ev = find_setups(df, funnel=fn, **sp)
+        for k in funnel:
+            funnel[k] += fn[k]
+        if ev.empty:
+            continue
+        ev = ev[ev.sig >= df.index.get_loc(F.index[0])].reset_index(drop=True)
+        X = attach_context(ev, F, df.index)
+        ev["sym"] = sym
+        ev["sig_t"] = df.index[ev.sig.values].asi8
+        ev["ex_t"] = df.index[ev.exit.values].asi8
+        log(f"  {sym}: {len(df)} candles {df.index[0].date()} -> {df.index[-1].date()} | {len(ev)} setups")
+        evs.append(ev)
+        Xs.append(X)
+    if not evs:
+        raise SystemExit("no data loaded for any symbol")
+    ev, X = pd.concat(evs, ignore_index=True), pd.concat(Xs, ignore_index=True)
+    order = np.argsort(ev.sig_t.to_numpy(), kind="stable")
+    return ev.iloc[order].reset_index(drop=True), X.iloc[order].reset_index(drop=True), funnel
+
+
+def breakeven(ev, rr):
+    """win rate needed to break even given the real maker/taker cost of wins and losses"""
+    cw = float(ev.loc[ev.outcome == "tp", "cost_R"].median()) if (ev.outcome == "tp").any() else 0.0
+    cl = float(ev.loc[ev.outcome == "sl", "cost_R"].median()) if (ev.outcome == "sl").any() else 0.0
+    return (1 + cl) / (rr - cw + 1 + cl)
+
+
 def run(cfg, log=print):
     a = cfg.args
-    sp = dict(rr=a.rr, win=a.win, fill_win=a.fill_win, max_hold=a.max_hold, sweep_len=a.sweep_len, cost_bps=cfg.fee_bps + cfg.slip_bps)
-    log(f"lightgbm={lgb is not None} | {cfg.source} {cfg.symbol} {cfg.timeframe} | setup params {sp}")
-    df = load_history(cfg, log)
-    log(f"{len(df)} candles {df.index[0].date()} -> {df.index[-1].date()} | building features + finding ICT setups...")
-    F = clean(build_features(df, cfg))
-    ev = find_setups(df, **sp)
-    ev = ev[ev.sig >= df.index.get_loc(F.index[0])].reset_index(drop=True)
+    sp = dict(rr=a.rr, win=a.win, fill_win=a.fill_win, max_hold=a.max_hold, sweep_len=a.sweep_len, max_risk=a.max_risk,
+              entry_mode=a.entry_mode, maker_bps=a.maker_bps, taker_bps=cfg.fee_bps, slip_bps=cfg.slip_bps)
+    log(f"lightgbm={lgb is not None} | {cfg.source} {a.symbols or cfg.symbol} {cfg.timeframe} | setup params {sp}")
+    ev, X, funnel = load_events(cfg, sp, log)
+    log(f"funnel (all symbols): {funnel['sweep']} sweeps -> {funnel['mss']} structure shifts -> {funnel['zone']} valid entries -> "
+        f"{funnel['trade']} filled & resolved trades")
     if len(ev) < 150:
-        raise SystemExit(f"only {len(ev)} setups: need more data (--years), a lower timeframe, or a larger --win / --fill_win")
-    X = attach_context(ev, F, df.index)
-    R, sig, ex = ev.R.to_numpy(), ev.sig.to_numpy(), ev.exit.to_numpy()
+        raise SystemExit(f"only {len(ev)} setups: add symbols (--symbols), more years, a lower timeframe, or loosen --win / --fill_win / --max_risk")
+    R, sig, ex, sym = ev.R.to_numpy(), ev.sig_t.to_numpy(), ev.ex_t.to_numpy(), ev.sym.to_numpy()
     y = (R > 0).astype(int)
     N = len(ev)
     hold = int(N * cfg.holdout_frac)
     dev = N - hold
-    be = (1 + float(ev.cost_R.median())) / (sp["rr"] + 1)
+    be = breakeven(ev, sp["rr"])
     log(f"{N} setups ({int((ev.dir > 0).sum())} long / {int((ev.dir < 0).sum())} short) | {X.shape[1]} features | dev {dev} | holdout {hold}")
-    log(f"break-even win rate at {sp['rr']:g}R after costs: {be*100:.0f}%  (a win rate above that is what pays, not a round 90%)")
-    log("ALL setups, no ML filter : " + fmt(stats(R[seq_filter(sig, ex, np.arange(N))])))
+    log(f"break-even win rate at {sp['rr']:g}R after maker/taker costs: {be*100:.0f}%  (a win rate above that is what pays, not a round 90%)")
+    log("ALL setups, no ML filter : " + fmt(stats(R[seq_filter(sig, ex, np.arange(N), sym)])))
 
     init = int(dev * 0.4)
     blk = (dev - init) // cfg.n_splits
-    sel_R, pool_R, thr_log = [], [], []
+    sel_R, sel_idx, pool_R, thr_log = [], [], [], []
     for k in range(cfg.n_splits):
         s, e = init + k * blk, min(init + (k + 1) * blk, dev)
         m, thr = train_block(X, R, y, sig, ex, s, a.min_trades, cfg.seed)
@@ -144,26 +193,31 @@ def run(cfg, log=print):
             thr_log.append(None)
             continue
         p = m.predict(X.iloc[test], num_iteration=m.best_iteration)
-        pick = seq_filter(sig, ex, test[p >= thr])
+        pick = seq_filter(sig, ex, test[p >= thr], sym)
         sel_R.append(R[pick])
+        sel_idx.append(pick)
         thr_log.append(round(thr, 3))
         log(f"fold {k+1}/{cfg.n_splits}: {len(test)} setups, thr {thr:.3f} -> " + fmt(stats(R[pick])))
     wf = np.concatenate(sel_R) if sel_R else np.array([])
     wf_pool = np.concatenate(pool_R)
     swf = stats(wf)
     p_raw = perm_p(wf_pool, wf, a.perm)
-    base = stats(R[seq_filter(sig, ex, np.arange(init, dev))])
+    base = stats(R[seq_filter(sig, ex, np.arange(init, dev), sym)])
     log("WALK-FORWARD baseline (all setups): " + fmt(base))
     log("WALK-FORWARD filtered            : " + fmt(swf))
+    if sel_idx and len(set(sym)) > 1:
+        wi = np.concatenate(sel_idx)
+        log("  per symbol (walk-forward, filtered): " + " | ".join(
+            f"{g} n={stats(R[wi][sym[wi] == g])['n']} {stats(R[wi][sym[wi] == g])['exp_R']:+.2f}R" for g in sorted(set(sym))))
 
     os.makedirs("runs", exist_ok=True)
     tpath = "runs/trials.json"
     tr = json.load(open(tpath)) if os.path.exists(tpath) else {}
-    key = f"{cfg.symbol}|{cfg.timeframe}|{cfg.exchange}"
+    key = f"{a.symbols or cfg.symbol}|{cfg.timeframe}|{cfg.exchange}"
     tr[key] = tr.get(key, 0) + 1
     json.dump(tr, open(tpath, "w"))
     p_adj = min(1.0, p_raw * tr[key])
-    log(f"random-selection p-value {p_raw:.3f} | this is trial #{tr[key]} on {cfg.symbol} {cfg.timeframe} -> adjusted p {p_adj:.3f}")
+    log(f"random-selection p-value {p_raw:.3f} | this is trial #{tr[key]} on this market set -> adjusted p {p_adj:.3f}")
 
     m, thr = train_block(X, R, y, sig, ex, dev, a.min_trades, cfg.seed)
     ho_idx = np.arange(dev, N)
@@ -172,10 +226,10 @@ def run(cfg, log=print):
         log("HOLDOUT: model abstains (no validation edge), 0 trades")
     else:
         p = m.predict(X.iloc[ho_idx], num_iteration=m.best_iteration)
-        ho_pick = seq_filter(sig, ex, ho_idx[p >= thr])
+        ho_pick = seq_filter(sig, ex, ho_idx[p >= thr], sym)
         sho = stats(R[ho_pick])
         log("HOLDOUT filtered                : " + fmt(sho))
-    log("HOLDOUT baseline (all setups)   : " + fmt(stats(R[seq_filter(sig, ex, ho_idx)])))
+    log("HOLDOUT baseline (all setups)   : " + fmt(stats(R[seq_filter(sig, ex, ho_idx, sym)])))
 
     imp = {}
     if m is not None:
@@ -191,7 +245,7 @@ def run(cfg, log=print):
     if m is not None:
         m.save_model(f"{cfg.out}/setup_model.txt", num_iteration=m.best_iteration)
     ev.iloc[ho_pick].to_csv(f"{cfg.out}/holdout_trades.csv", index=False)
-    res = dict(symbol=cfg.symbol, timeframe=cfg.timeframe, setups=int(N), params=sp, break_even_win=be, thresholds=thr_log,
+    res = dict(symbol=a.symbols or cfg.symbol, funnel=funnel, timeframe=cfg.timeframe, setups=int(N), params=sp, break_even_win=be, thresholds=thr_log,
                holdout_threshold=None if not np.isfinite(thr) else thr, columns=list(X.columns),
                baseline_wf={k: v for k, v in base.items()}, walk_forward=swf, p_raw=p_raw, p_adjusted=p_adj, trial=tr[key],
                holdout=sho, importance=imp, edge=bool(edge), verdict=verdict)

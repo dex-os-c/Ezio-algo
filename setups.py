@@ -3,18 +3,23 @@
 A LONG setup (shorts are the exact mirror, computed on the price-negated series):
   1. SWEEP   a bar wicks below the last confirmed swing low and closes back above it (sell-side liquidity taken)
   2. MSS     within `win` bars a close above the last internal swing high / the sweep bar's high (market-structure shift)
-  3. FVG     a bullish fair-value gap formed during that move
-  4. ENTRY   limit order at the FVG midpoint, STOP just below the sweep low, TARGET at `rr` x risk
+  3. ZONE    where to buy the pullback, first one that is valid (entry_mode="any"):
+               FVG  = midpoint of the latest bullish fair-value gap inside the move
+               OB   = midpoint of the last down-candle before the move (order block)
+               OTE  = 70.5% retracement of the move (optimal trade entry)
+  4. ENTRY   limit order at that level, STOP just below the sweep low, TARGET at `rr` x risk
 
 Everything used to ARM a setup is known at the close of the MSS bar (the 'signal bar'). The simulator then walks forward with
 conservative rules: the order must trade through the limit, a bar that touches both stop and target counts as a stop, the target
-is not counted on the fill bar, and costs are charged in R. Unresolved trades at the end of the data are dropped.
+is not counted on the fill bar, and costs are charged in R (limit entry and limit target pay the maker fee; stops and timeouts
+pay taker fee + slippage). Unresolved trades at the end of the data are dropped.
 """
 import numpy as np, pandas as pd
 from smc import atr as _atr, confirmed_swings
 
-DEFAULT = dict(sweep_len=5, mss_len=3, win=20, fill_win=12, rr=2.0, max_hold=48,
-               min_risk=0.3, max_risk=4.0, buf=0.1, cost_bps=7.0)
+DEFAULT = dict(sweep_len=4, mss_len=3, win=30, fill_win=24, rr=2.0, max_hold=48, min_risk=0.3, max_risk=5.0, buf=0.1,
+               maker_bps=2.0, taker_bps=5.0, slip_bps=2.0, entry_mode="any")
+MODES = {"fvg": 0, "ob": 1, "ote": 2}
 
 
 def _mirror(df):
@@ -48,7 +53,7 @@ def _simulate(h, l, c, i, entry, stop, tp, rr, fill_win, max_hold):
     return j, end, (c[end] - entry) / risk, "timeout"
 
 
-def _scan(df, p):
+def _scan(df, p, fn):
     o, h, l, c = (df[k].to_numpy(float) for k in ("open", "high", "low", "close"))
     n = len(c)
     a = _atr(df).to_numpy()
@@ -62,6 +67,7 @@ def _scan(df, p):
             continue
         if sl_v[i] == sl_v[i] and l[i] < sl_v[i] and c[i] > sl_v[i]:           # 1. sweep (re)starts the setup
             s, swing, ext = i, sl_v[i], l[i]
+            fn["sweep"] += 1
             lvl = max(ish[i], h[i]) if ish[i] == ish[i] else h[i]
         elif s >= 0:
             ext = min(ext, l[i])
@@ -70,44 +76,62 @@ def _scan(df, p):
                 continue
             if c[i] > lvl:                                                       # 2. market-structure shift
                 s0, s = s, -1
-                fv = None
-                for k in range(i, s0 + 1, -1):                                   # 3. latest bullish FVG inside the move
+                fn["mss"] += 1
+                zones = []
+                for k in range(i, s0 + 1, -1):                                   # FVG: latest bullish gap inside the move
                     if l[k] > h[k - 2]:
-                        fv = (h[k - 2], l[k])
+                        zones.append(("fvg", (h[k - 2] + l[k]) / 2, l[k] - h[k - 2]))
                         break
-                if fv is None:
-                    continue
-                entry = (fv[0] + fv[1]) / 2
+                for k in range(i - 1, s0 - 1, -1):                               # OB: last down-candle before the move
+                    if c[k] < o[k]:
+                        zones.append(("ob", (h[k] + l[k]) / 2, h[k] - l[k]))
+                        break
+                top = h[s0:i + 1].max()
+                zones.append(("ote", top - 0.705 * (top - ext), 0.0))
+                if p["entry_mode"] != "any":
+                    zones = [z for z in zones if z[0] == p["entry_mode"]]
                 stop = ext - p["buf"] * ai
-                risk = entry - stop
-                if not (entry < c[i] and p["min_risk"] * ai <= risk <= p["max_risk"] * ai):
+                pick = None
+                for name, entry, width in zones:                                 # first valid zone in priority order
+                    risk = entry - stop
+                    if entry < c[i] and p["min_risk"] * ai <= risk <= p["max_risk"] * ai:
+                        pick = (name, entry, width, risk)
+                        break
+                if pick is None:
                     continue
+                fn["zone"] += 1
+                name, entry, width, risk = pick
                 tp = entry + p["rr"] * risk
                 sim = _simulate(h, l, c, i, entry, stop, tp, p["rr"], p["fill_win"], p["max_hold"])
                 if sim is None:
                     continue
+                fn["trade"] += 1
                 fill, ex, rg, how = sim
-                cost_r = 2 * p["cost_bps"] / 1e4 * abs(entry) / risk
+                exit_bps = p["maker_bps"] if how == "tp" else p["taker_bps"] + p["slip_bps"]
+                cost_r = (p["maker_bps"] + exit_bps) / 1e4 * abs(entry) / risk
                 tgt = (sh_v[i] - entry) / risk if sh_v[i] == sh_v[i] and sh_v[i] > entry else 10.0
                 out.append(dict(
                     sig=i, entry=entry, stop=stop, tp=tp, risk=risk, fill=fill, exit=ex, outcome=how,
                     R_gross=rg, R=rg - cost_r, cost_R=cost_r,
-                    s_sweep_depth=(swing - ext) / ai, s_sweep_age=i - s0, s_mss_atr=(c[i] - lvl) / ai,
-                    s_body_atr=(c[i] - o[i]) / ai, s_fvg_atr=(fv[1] - fv[0]) / ai, s_risk_atr=risk / ai,
+                    s_mode=MODES[name], s_sweep_depth=(swing - ext) / ai, s_sweep_age=i - s0, s_mss_atr=(c[i] - lvl) / ai,
+                    s_body_atr=(c[i] - o[i]) / ai, s_zone_atr=width / ai, s_risk_atr=risk / ai,
                     s_risk_pct=risk / abs(entry), s_retrace=(c[i] - entry) / risk, s_tgt_R=min(tgt, 10.0)))
     return out
 
 
-def find_setups(df, **kw):
-    """all simulated ICT setups (both directions), one row each, sorted by signal bar"""
+def find_setups(df, funnel=None, **kw):
+    """all simulated ICT setups (both directions), one row each, sorted by signal bar.
+    funnel (optional dict) receives how many candidates survived each stage: sweep -> mss -> zone -> trade"""
     p = {**DEFAULT, **kw}
-    rows = []
+    rows, fn = [], dict(sweep=0, mss=0, zone=0, trade=0)
     for d, src in ((1, df), (-1, _mirror(df))):
-        for e in _scan(src, p):
+        for e in _scan(src, p, fn):
             e["dir"] = d
             if d < 0:
                 e["entry"], e["stop"], e["tp"] = -e["entry"], -e["stop"], -e["tp"]
             rows.append(e)
+    if funnel is not None:
+        funnel.update(fn)
     ev = pd.DataFrame(rows)
     if ev.empty:
         return ev
