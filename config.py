@@ -12,6 +12,9 @@ class Cfg:
     timeframe: str = "1h"            # 15m | 1h | 4h | 1d
     years: float = 8.0               # history to use. Binance starts 2017 (~8-9y); more is not available
     bars: int = 20000                # synthetic only
+    start: str = ""                  # fixed first candle (YYYY-MM-DD, UTC). Empty = rolling `years` window. Set it for reproducible research runs
+    end: str = ""                    # last candle (exclusive). Empty = everything available, except data after the freeze cutoff (see freeze.py)
+    confirm: bool = False            # confirmatory run: allowed to read data after the freeze cutoff
     features: str = "base,smc,amt"   # which feature sets (see features.py)
     # ---- target / model ----
     horizon: int = 8                 # predict direction of the next N bars

@@ -32,7 +32,15 @@ def main():
     assert ev.s_mode.nunique() >= 2, 'expected several entry modes'
     assert set(ev.s_mode) <= {0, 1, 2}
     check(df, ev, 2.0, 48)
-    print(f"geometry + independent re-simulation ok ({len(ev)} setups)")
+    # exact cost formula: limit entry pays maker; target pays maker; stop/timeout pay taker + slippage; both legs, in units of risk
+    for r in ev.itertuples():
+        exit_bps = 2.0 if r.outcome == "tp" else 5.0 + 2.0
+        want = (2.0 + exit_bps) / 1e4 * abs(r.entry) / r.risk if r.s_mode != 3 else (7.0 + exit_bps) / 1e4 * abs(r.entry) / r.risk
+        assert abs(r.cost_R - want) < 1e-12, (r.outcome, r.cost_R, want)
+        assert abs(r.R - (r.R_gross - r.cost_R)) < 1e-12
+        # gross R reconciles with the actual fill/exit prices
+        assert abs(r.R_gross - r.dir * (r.exit_px - r.fill_px) / r.risk) < 1e-9, "gross R must equal (exit - fill) / planned risk"
+    print(f"geometry + independent re-simulation + exact cost formula + price reconciliation ok ({len(ev)} setups)")
 
     cut = 20000                                       # no lookahead: truncating the future must not change closed trades
     part = find_setups(df.iloc[:cut])

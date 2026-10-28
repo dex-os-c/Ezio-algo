@@ -2,6 +2,7 @@
 import os, time
 import numpy as np, pandas as pd
 from config import tf_minutes
+from data_quality import sanitize
 
 COLS = ["open", "high", "low", "close", "volume"]
 
@@ -99,13 +100,28 @@ def load_history(cfg, log=print):
             log(f"  could not fetch new candles ({type(e).__name__}); using the cached file")
             new = old.iloc[:0]
         df = pd.concat([old, new]) if old is not None else new
-        df = df[~df.index.duplicated()].sort_index()
+        df, _ = sanitize(df, cfg.timeframe, log=log)           # dedupe (newest copy wins), drop forming/malformed candles, report gaps
         if len(df) < 500:
             raise RuntimeError(f"only {len(df)} candles for {cfg.symbol} on {cfg.exchange}; check symbol/exchange/network")
     df.to_csv(path)
-    if cfg.source == "ccxt":
+    return window(df, cfg, log)
+
+
+def window(df, cfg, log=print):
+    """fixed research window: [start, end). Without `start` the rolling `years` window applies (ccxt). Data at/after the freeze cutoff is
+    withheld unless cfg.confirm (see freeze.py), so exploratory runs cannot touch the confirmatory period."""
+    if cfg.start:
+        df = df[df.index >= pd.Timestamp(cfg.start, tz="UTC")]
+    elif cfg.source == "ccxt":
         df = df[df.index >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=cfg.years * 365)]
-    return df
+    end = pd.Timestamp(cfg.end, tz="UTC") if cfg.end else None
+    from freeze import cutoff
+    cut = None if cfg.confirm else cutoff()
+    if cut is not None and (end is None or cut < end):
+        end = cut
+        if len(df) and df.index[-1] >= cut:
+            log(f"  data from {cut.date()} on is frozen for confirmatory testing and withheld (use --confirm to read it)")
+    return df[df.index < end] if end is not None else df
 
 
 class LiveFeed:

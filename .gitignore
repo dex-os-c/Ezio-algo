@@ -5,3 +5,4 @@ data/
 *.pt
 *.gguf
 .env
+research_out/

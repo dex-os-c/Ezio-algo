@@ -19,6 +19,7 @@ from config import parse
 from data import load_history
 from features import build_features, clean
 from setups import find_setups, attach_context, DEFAULT
+from data_quality import to_ns
 
 try:
     import lightgbm as lgb
@@ -141,8 +142,8 @@ def load_events(cfg, sp, log):
         ev = ev[ev.sig >= df.index.get_loc(F.index[0])].reset_index(drop=True)
         X = attach_context(ev, F, df.index)
         ev["sym"] = sym
-        ev["sig_t"] = df.index[ev.sig.values].asi8
-        ev["ex_t"] = df.index[ev.exit.values].asi8
+        ev["sig_t"] = to_ns(df.index[ev.sig.values])
+        ev["ex_t"] = to_ns(df.index[ev.exit.values])
         log(f"  {sym}: {len(df)} candles {df.index[0].date()} -> {df.index[-1].date()} | {len(ev)} setups")
         evs.append(ev)
         Xs.append(X)

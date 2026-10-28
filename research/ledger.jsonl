@@ -1,0 +1,8 @@
+{"kind": "legacy", "id": "L1", "what": "train.py probability model BTC/USDT 1h: walk-forward + holdout printed", "holdout_viewed": true, "markets": "BTC/USDT 1h", "ts": "reconstructed", "commit": "unknown"}
+{"kind": "legacy", "id": "L2", "what": "train_setups.py BTC/USDT 1h, 293 setups (first version): holdout printed", "holdout_viewed": true, "markets": "BTC/USDT 1h", "ts": "reconstructed", "commit": "unknown"}
+{"kind": "legacy", "id": "L3", "what": "train_setups.py BTC/USDT 1h, 676 setups: holdout printed", "holdout_viewed": true, "markets": "BTC/USDT 1h", "ts": "reconstructed", "commit": "unknown"}
+{"kind": "legacy", "id": "L4", "what": "same run repeated (identical output pasted twice)", "holdout_viewed": true, "markets": "BTC/USDT 1h", "ts": "reconstructed", "commit": "unknown"}
+{"kind": "legacy", "id": "L5", "what": "train_setups.py pooled 8 coins 1h: holdout printed", "holdout_viewed": true, "markets": "8 coins 1h", "ts": "reconstructed", "commit": "unknown"}
+{"kind": "legacy", "id": "L6", "what": "analyze_setups.py pooled 8 coins 1h: best-slice holdout printed", "holdout_viewed": true, "markets": "8 coins 1h", "ts": "reconstructed", "commit": "unknown"}
+{"kind": "legacy", "id": "L7", "what": "analyze_setups.py pooled 8 coins 4h: best-slice holdout printed", "holdout_viewed": true, "markets": "8 coins 4h", "ts": "reconstructed", "commit": "unknown"}
+{"kind": "freeze", "id": "confirmatory-cutoff", "ts": "2026-10-28 10:57:40 UTC", "commit": "48545dd+dirty", "cutoff": "2026-11-01", "note": "All data from this date on is reserved for confirmatory testing; exploratory runs cannot read it. The old 15% holdout is declared contaminated.", "holdout_viewed": false}

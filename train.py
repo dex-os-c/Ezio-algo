@@ -11,7 +11,7 @@ from config import parse
 from data import load_history
 from features import dataset
 from models import Predictor, HAS_TORCH, HAS_LGB
-from backtest import backtest, fmt
+from backtest import backtest, backtest_legacy, fmt
 
 
 def score(p, y):
@@ -61,9 +61,10 @@ def run_training(cfg, log=print):
         oos[te_s:te_e] = P.predict(F.iloc[te_s - S + 1:te_e])[S - 1:]
         log(f"fold {k + 1}/{cfg.n_splits}: train {tr_end} -> test {te_e - te_s} bars | {info} | {score(oos[te_s:te_e], yv[te_s:te_e])}")
     m = ~np.isnan(oos)
-    wf_score, bt = score(oos, yv), backtest(close.values[m], oos[m], cfg)
+    wf_score, bt = score(oos, yv), backtest(close.values[m], oos[m], cfg, idx=np.flatnonzero(m))
     log(f"WALK-FORWARD OOS  : {wf_score}")
-    log(f"WALK-FORWARD trade: {fmt(bt)}")
+    log(f"WALK-FORWARD trade: {fmt(bt)}  [{bt['segments']} separate folds, nothing earned across the embargo gaps]")
+    log(f"  (original method that glued the folds together, for comparison only: {fmt(backtest_legacy(close.values[m], oos[m], cfg))})")
 
     vs = int(dev_n * 0.85)
     P = Predictor(cfg)
@@ -71,7 +72,7 @@ def run_training(cfg, log=print):
     ph = np.full(n, np.nan)
     ph[dev_n + H:] = P.predict(F.iloc[dev_n + H - S + 1:])[S - 1:]
     mh = ~np.isnan(ph)
-    ho_score, bth = score(ph, yv), backtest(close.values[mh], ph[mh], cfg)
+    ho_score, bth = score(ph, yv), backtest(close.values[mh], ph[mh], cfg, idx=np.flatnonzero(mh))
     log(f"HOLDOUT           : {ho_score}")
     log(f"HOLDOUT trade     : {fmt(bth)}")
 
@@ -90,8 +91,8 @@ def run_training(cfg, log=print):
                "Do not trade this. Change the features, look-ahead or timeframe, not the number of epochs.")
     res = {"symbol": cfg.symbol, "timeframe": cfg.timeframe, "exchange": cfg.exchange, "source": cfg.source,
            "features": cfg.features, "n_bars": n, "n_features": F.shape[1], "data_from": str(df.index[0]), "data_to": str(df.index[-1]),
-           "holdout_start": str(F.index[dev_n + H]), "walk_forward": {**wf_score, **{k: v for k, v in bt.items() if k != "equity"}},
-           "holdout": {**ho_score, **{k: v for k, v in bth.items() if k != "equity"}}, "importance": imp, "curve": curve,
+           "holdout_start": str(F.index[dev_n + H]), "walk_forward": {**wf_score, **{k: v for k, v in bt.items() if k not in ("equity", "net", "trade_pnl")}},
+           "holdout": {**ho_score, **{k: v for k, v in bth.items() if k not in ("equity", "net", "trade_pnl")}}, "importance": imp, "curve": curve,
            "edge": bool(edge), "verdict": verdict, "cfg": {k: v for k, v in vars(cfg).items() if k != "args"}}
     json.dump(res, open(f"{cfg.out}/metrics.json", "w"))
     log(f"saved -> {cfg.out}/model")
