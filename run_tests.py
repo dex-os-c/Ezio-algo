@@ -18,6 +18,14 @@ TESTS = [("test_features.py", "feature leak-safety (swings, FVG, HTF, killzones,
          ("test_analyze.py", "slice analysis finds planted slice, rejects noise")]
 
 
+def _has(mod):
+    try:
+        __import__(mod)
+        return True
+    except Exception:
+        return False
+
+
 def main(out="research_out"):
     os.makedirs(out, exist_ok=True)
     rows = []
@@ -31,8 +39,8 @@ def main(out="research_out"):
         text = p.stdout + p.stderr
         if p.returncode == 0 and "ALL OK" in text:
             st, why = "PASS", next((l for l in reversed(tail) if "passed" in l or "ok" in l.lower()), "")
-        elif "ModuleNotFoundError" in text or "ImportError" in text:
-            st, why = "COULD_NOT_RUN", next((l for l in tail if "Error" in l), "import error")
+        elif "ModuleNotFoundError" in text or "ImportError" in text or (f == "test_train_setups.py" and not _has("lightgbm")):
+            st, why = "COULD_NOT_RUN", next((l for l in tail if "Error" in l), "needs lightgbm: pip install lightgbm")
         else:
             st, why = "FAIL", tail[-1] if tail else "no output"
         rows.append(dict(test=f, status=st, why=why[:160], what=what, seconds=round(time.time() - t0, 1)))

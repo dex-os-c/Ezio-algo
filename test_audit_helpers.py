@@ -1,6 +1,6 @@
 """Helpers of audit_ict.py: dev/holdout split must be purged, and traded() must return the right EVENT indices for any subset."""
 import numpy as np, pandas as pd
-from audit_ict import split, traded, r_stats
+from audit_ict import split, traded, r_stats, split_at
 
 n_ok = 0
 
@@ -36,6 +36,26 @@ big = pd.DataFrame(dict(sym="A", sig_t=np.arange(40) * 10, ex_t=np.arange(40) * 
                         ts=pd.date_range("2024-01-01", periods=40, freq="D", tz="UTC")))
 s = r_stats(big, np.arange(40), 200)
 ok(s["n"] == 40 and abs(s["exp_R"] - 1.95) < 1e-12 and s["win"] == 39 / 40 + 0.0 * 0 or abs(s["win"] - 39 / 40) < 1e-12, "r_stats on a known set")
+
+# every variant must share ONE time boundary with H0 (a variant with a different number of events used to get a different dev/holdout date)
+_, ho_ = split(ev, 0.3)
+first = int(ev.sig_t.iloc[ho_[0]])
+ok(list(split_at(ev, first)) == list(dev), "split_at with H0's boundary reproduces H0's purged dev set")
+ev2 = pd.concat([ev, ev.assign(sig_t=ev.sig_t + 5, ex_t=ev.ex_t + 5)], ignore_index=True)       # a "variant" with twice as many events
+ok(all(ev2.sig_t.iloc[split_at(ev2, first)] < first) and all(ev2.ex_t.iloc[split_at(ev2, first)] < first), "variant dev set respects the common boundary and the purge")
+ok(len(split(ev2, 0.3)[0]) != len(split_at(ev2, first)), "per-variant split() would have placed the boundary elsewhere (the bug this guards)")
+
+# manifest must really record the data files it is given (the argument was once swallowed by a comment)
+import os, json, tempfile, manifest
+d = tempfile.mkdtemp()
+fp = os.path.join(d, "x.csv")
+open(fp, "w").write("a,b\n1,2\n")
+m = manifest.write(os.path.join(d, "m.json"), args={}, data_files=[fp], extra={})
+ok(fp in m["data"] and m["data"][fp]["bytes"] == 8, "manifest records a hash and size for every data file")
+import ast
+src = ast.parse(open("audit_ict.py").read())
+call = [n for n in ast.walk(src) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "write" and getattr(getattr(n.func, "value", None), "id", "") == "mf"][0]
+ok("data_files" in [k.arg for k in call.keywords], "audit_ict.main actually passes data_files to the manifest")
 print(f"{n_ok} audit-helper checks passed")
 print("ALL OK")
 
@@ -49,5 +69,25 @@ good = dict(tf="1h", id="H4", exp_R=0.2, p_adj=0.01, n=150, validated=True)
 bad = dict(tf="1h", id="H4", exp_R=-0.1, p_adj=1.0, n=150, validated=False)
 ok(verdict([dict(tf="1h", hypotheses=[h("H4", True)], confirmation=[good])], quiet).startswith("VALIDATED EDGE"), "confirmed candidate -> validated")
 ok(verdict([dict(tf="1h", hypotheses=[h("H4", True)], confirmation=[bad])], quiet).startswith("NO DEMONSTRATED EDGE"), "candidate that fails confirmation -> no edge")
+
+# every variant must share ONE time boundary with H0 (a variant with a different number of events used to get a different dev/holdout date)
+_, ho_ = split(ev, 0.3)
+first = int(ev.sig_t.iloc[ho_[0]])
+ok(list(split_at(ev, first)) == list(dev), "split_at with H0's boundary reproduces H0's purged dev set")
+ev2 = pd.concat([ev, ev.assign(sig_t=ev.sig_t + 5, ex_t=ev.ex_t + 5)], ignore_index=True)       # a "variant" with twice as many events
+ok(all(ev2.sig_t.iloc[split_at(ev2, first)] < first) and all(ev2.ex_t.iloc[split_at(ev2, first)] < first), "variant dev set respects the common boundary and the purge")
+ok(len(split(ev2, 0.3)[0]) != len(split_at(ev2, first)), "per-variant split() would have placed the boundary elsewhere (the bug this guards)")
+
+# manifest must really record the data files it is given (the argument was once swallowed by a comment)
+import os, json, tempfile, manifest
+d = tempfile.mkdtemp()
+fp = os.path.join(d, "x.csv")
+open(fp, "w").write("a,b\n1,2\n")
+m = manifest.write(os.path.join(d, "m.json"), args={}, data_files=[fp], extra={})
+ok(fp in m["data"] and m["data"][fp]["bytes"] == 8, "manifest records a hash and size for every data file")
+import ast
+src = ast.parse(open("audit_ict.py").read())
+call = [n for n in ast.walk(src) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "write" and getattr(getattr(n.func, "value", None), "id", "") == "mf"][0]
+ok("data_files" in [k.arg for k in call.keywords], "audit_ict.main actually passes data_files to the manifest")
 print(f"{n_ok} audit-helper checks passed (incl. verdict logic)")
 print("ALL OK")

@@ -45,7 +45,7 @@ def _simulate(o, h, l, c, i, entry, stop, tp, rr, p, market=False):
     else:
         j = -1
         for t in range(i + 1, min(i + 1 + p["fill_win"], n)):
-            filled = l[t] <= entry * (1 - pen)
+            filled = l[t] <= entry - pen * abs(entry)     # abs(): shorts run on NEGATED prices, where entry * (1 - pen) would ease the fill
             if p["legacy_cancel"] and h[t] >= tp:         # ORIGINAL behaviour: dropped any setup whose fill bar also reached the target
                 return None
             if filled:
@@ -61,7 +61,7 @@ def _simulate(o, h, l, c, i, entry, stop, tp, rr, p, market=False):
         if l[t] <= stop or (gap and t == j and not market and fill_px <= stop):   # stop is checked before target (conservative)
             px = min(stop, o[t]) if gap else stop
             return j, t, (px - fill_px) / risk0, "sl", px, fill_px
-        if (t > j or market) and h[t] >= tp * (1 + pen):  # the target does not count on a limit order's own fill bar
+        if (t > j or market) and h[t] >= tp + pen * abs(tp):  # the target does not count on a limit order's own fill bar
             return j, t, (tp - fill_px) / risk0, "tp", tp, fill_px
     if j + p["max_hold"] > n - 1:                         # data ended before the trade resolved
         return None

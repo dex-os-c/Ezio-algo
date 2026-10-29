@@ -16,8 +16,13 @@ Effect sizes quoted below come from *synthetic* data (the sandbox that wrote thi
 | B7 | `train_setups.py` | `Index.asi8` returns the index's own time unit (ns or us depending on pandas), used to order events across symbols. | `test_data_quality.py` (found by it) | Latent; replaced by `data_quality.to_ns`. |
 | B8 | `data.py` | Rolling `--years` window moved every day (runs not reproducible), dedupe kept the oldest copy of a duplicate and used an unstable sort, no integrity checks. | `test_data_quality.py` | Added `--start/--end`, newest-copy-wins stable dedupe, `sanitize`. |
 | B9 | `audit_ict.py` (development) | My own `traded()` helper indexed the subset twice; only correct when the subset was everything. Caught by a crash before any result was reported. | `test_audit_helpers.py` | n/a |
+| B10 | `setups.py::_simulate` | `fill_pen_bps` (trade-through requirement) used `entry*(1-pen)` and `tp*(1+pen)`. Shorts are simulated on NEGATED prices, so for shorts the penalty made fills and targets EASIER instead of harder. Found in review of the real-data run; S5/S6/S8 were too optimistic on the short side. | `test_execution.py` #14 (short mirror of the long scenarios; fails on the old code) | Real data (run of 2026-10-28): S5/S6 moved expectancy by only 0.002-0.006R, verdict unchanged. Now `entry - pen*abs(entry)`, `tp + pen*abs(tp)`. |
+| B11 | `audit_ict.py::main` | `data_files=` was swallowed by a trailing `#` comment, so `manifest.json` recorded no data hashes (0 entries in the real-data run). The run could not prove which candles produced it. | `test_audit_helpers.py` (manifest hashes + AST check that main passes `data_files`) | Reproducibility only. |
+| B12 | `audit_ict.py` step 7 | (a) Each variant (H1-H3, H7) got its own 85/15 split by event COUNT, so variants were judged on different periods than H0 and the slices. (b) Bonferroni used x8 although every hypothesis is tested on each timeframe: x16 for 1h+4h. | `test_audit_helpers.py` (`split_at`) | The 4h killzone candidate (H6, raw p=0.019) had adj-p 0.156 under x8; it is weaker still under x16. No hypothesis changes status. |
 
 **Do these explain the negative ICT result?** No. The two bugs that touch the ICT reports (B1, B4) either flattered the numbers slightly or made them look *more* certain; fixing them cannot turn about -0.04R per trade into a robust positive. The measured size on real data is in `reproduction.csv` / `scenarios.csv` after you run the audit.
+
+Real-data result (Binance, 8 coins, 2018-10-29 to 2026-10-28): verdict NO DEMONSTRATED EDGE. 1h H0 -0.046R, 4h H0 -0.025R per trade net of costs; both timeframes reproduced the original report exactly. B10-B12 were found after that run and do not change it.
 
 ## Risks (assumptions now measured, not hidden)
 

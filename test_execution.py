@@ -83,5 +83,22 @@ ok(r[3] == "sl", "market entry: same-bar stop beats target")
 # 13. data ends before the trade resolves -> dropped, never counted
 ok(run([SIG, (101, 101.5, 99.9, 100.5), (100.5, 101, 100, 100.5)]) is None, "unresolved trade at end of data is dropped")
 
+# 14. the trade-through penalty must hurt SHORTS exactly as much as longs. Shorts are simulated on NEGATED prices, so the mirror of every
+#     long scenario above must give the mirrored result (this caught entry*(1-pen) / tp*(1+pen) easing short fills instead of hardening them)
+def run_short(bars_real, **kw):
+    """bars_real: real-price (open, high, low, close); short = sell limit 100, stop 102, target 96. Simulated as the code does: negated series."""
+    a = np.array(bars_real, float)
+    p = {**P, **kw}
+    return _simulate(-a[:, 0], -a[:, 2], -a[:, 1], -a[:, 3], 0, -100.0, -102.0, -96.0, 2.0, p)
+
+
+S_SIG = (98, 99, 97, 97.5)
+touch_entry = [S_SIG, (99, 100.0, 98.5, 99.5), (99.5, 99.8, 95.5, 96)]
+ok(run_short(touch_entry) is not None and run_short(touch_entry, fill_pen_bps=2.0) is None, "short: trade-through requirement on entry")
+through = [S_SIG, (99, 100.1, 98.5, 99.5), (99.5, 99.8, 95.5, 96)]
+ok(run_short(through, fill_pen_bps=2.0) is not None, "short: fills once price trades through the limit by more than the penalty")
+touch_target = [S_SIG, (99, 100.2, 98.5, 99.5), (99.5, 99.8, 96.0, 97)] + [(97, 97.5, 96.5, 97)] * 60
+ok(run_short(touch_target)[3] == "tp" and run_short(touch_target, fill_pen_bps=2.0)[3] == "timeout", "short: target trade-through requirement")
+
 print(f"{checks} execution checks passed")
 print("ALL OK")

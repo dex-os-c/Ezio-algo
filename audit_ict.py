@@ -102,6 +102,12 @@ def split(ev, hold=0.15):
     return dev, idx[N - h:]
 
 
+def split_at(ev, first):
+    """dev = events that signalled AND closed before `first` (the holdout's first signal time, ns). Used so every variant shares ONE boundary:
+    split() on each variant's own events put the boundary at a different date per variant, so variants were judged on different periods."""
+    return np.flatnonzero(((ev.sig_t < first) & (ev.ex_t < first)).to_numpy())
+
+
 def traded(ev, idx):
     """one position per symbol at a time (the rule the original report used)"""
     return seq_filter(ev.sig_t.to_numpy(), ev.ex_t.to_numpy(), idx, ev.sym.to_numpy()) if len(idx) else idx   # returns EVENT indices
@@ -218,6 +224,7 @@ def run_timeframe(cfg, a, tf, symbols, out, log, L):
     # ---- baseline events, corrected simulator
     ev0, X0, funnel = be(ctx, params(cfg), with_X=True)
     dev0, ho0 = split(ev0)
+    first0 = int(ev0.sig_t.iloc[ho0[0]])                      # the common dev/holdout boundary of H0, reused by every variant
     log(f"\ncorrected simulator, H0: {funnel} -> {len(ev0)} setups ({int((ev0.dir > 0).sum())} long / {int((ev0.dir < 0).sum())} short)")
     # ---- step 4: before / after
     banner(f"[{tf}] STEP 4: before vs after the confirmed fixes (all events, one position per symbol, net of costs)", log)
@@ -252,13 +259,13 @@ def run_timeframe(cfg, a, tf, symbols, out, log, L):
         log(f"  {r.group:10s} {r.level:18s} n={r.n:5d} win {r.win*100:3.0f}% exp {r.exp_R:+.3f}R [{r.ci_lo:+.3f},{r.ci_hi:+.3f}]{flag}")
     res["breakdown"] = bd.assign(tf=tf)
     # ---- step 7: pre-registered hypotheses, exploration (purged dev) only
-    banner(f"[{tf}] STEP 7: {len(hy.HYPOTHESES)} pre-registered hypotheses on EXPLORATION data (registry {hy.registry_hash()}); Bonferroni x{len(hy.HYPOTHESES)}", log)
-    m = len(hy.HYPOTHESES)
+    banner(f"[{tf}] STEP 7: {len(hy.HYPOTHESES)} pre-registered hypotheses on EXPLORATION data (registry {hy.registry_hash()}); Bonferroni x{len(hy.HYPOTHESES) * len([t for t in a.timeframes.split(',') if t.strip()])} (hypotheses x timeframes)", log)
+    m = len(hy.HYPOTHESES) * len([t for t in a.timeframes.split(",") if t.strip()])     # every hypothesis is tested once per timeframe
     hrows = []
     for h in hy.HYPOTHESES:
         if h["kind"] == "variant":
             e, _, _ = (ev0, X0, None) if not h["params"] else be(ctx, params(cfg, **h["params"]))
-            d, _ = split(e)
+            d = split_at(e, first0)
             pos = traded(e, d)
         else:
             keep = slice_rule(h["rule"], X0)
@@ -422,8 +429,9 @@ def main():
                         [dict(tf=h["tf"], strategy=h["id"], **{k: v_ for k, v_ in h.items() if k not in ("tf", "id", "text")}) for r in results for h in r["hypotheses"]])
     summ.to_csv(f"{out}/strategies_summary.csv", index=False)
     json.dump({r["tf"]: r["quality"] for r in results}, open(f"{out}/data_quality.json", "w"), indent=1, default=str)
-    man = mf.write(f"{out}/manifest.json", args={**vars(a), **{k: v_ for k, v_ in vars(cfg).items() if k != "args"}},     # resolved config wins over raw CLI defaults data_files=sorted(set(files)),
-                   extra=dict(hypothesis_registry=hy.registry_hash(), verdict=v))
+    # resolved config wins over the raw CLI defaults; data_files are hashed so the run can be tied to the exact candles used
+    man = mf.write(f"{out}/manifest.json", args={**vars(a), **{k: v_ for k, v_ in vars(cfg).items() if k != "args"}},
+                   data_files=sorted(set(files)), extra=dict(hypothesis_registry=hy.registry_hash(), verdict=v))
     write_report(out, results, [r["reproduction"] for r in results], tests, v, a, man)
     json.dump(dict(verdict=v, timeframes=[r["tf"] for r in results]), open(f"{out}/summary.json", "w"), indent=1)
     log(f"\nwrote {out}/: audit_report.md, trades_H0.csv, strategies_summary.csv, hypotheses.csv, scenarios.csv, breakdowns.csv, baselines.csv, "
